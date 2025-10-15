@@ -2,294 +2,289 @@ import time
 import numpy as np
 import math as m
 import random as rand
-import re
 
 # ======================= Global constants =======================
 pi = np.pi
-d2r = pi / 180
-r2d = 1 / d2r
-Pe = np.array([0, 0, 0, 1], dtype=float)          # origin of current frame
-Ende = np.array([0, 0, 0.19163, 1], dtype=float)  # ไม่ได้ใช้ใน FK หลักแล้ว แต่คงไว้ให้
+d2r = pi/180
+r2d = 1/d2r
 
-# Joint accel limits (ถ้าจะใช้จำกัด joint ภายหลังได้)
-a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float)
+# ======================= Global variables =======================
+DH_table = None
+DH_size  = 0
+Pe   = np.array([0, 0, 0, 1], dtype=float)
+Ende = np.array([0, 0, 0.19163, 1], dtype=float)
 
-# Globals จะถูกเซ็ตใน sysCall_thread()
-theta = None          # current joint angles [rad], length 6
-DH_table = None       # DH rows: [alpha_deg, a, d, theta_offset_deg]
+# ======================= Core robot math (names unchanged) =======================
+def degarr2radarr(deg_dict_or_arr):
+    if isinstance(deg_dict_or_arr, dict):
+        arr_deg = np.array([deg_dict_or_arr.get(i, 0.0) for i in range(6)], dtype=float)
+    else:
+        arr_deg = np.array(deg_dict_or_arr, dtype=float)
+    return arr_deg * d2r
 
-# ======================= DH & Transform =======================
 def dh_transforms(alpha, a, d, theta):
-    ca, sa = m.cos(alpha), m.sin(alpha)
-    ct, st = m.cos(theta), m.sin(theta)
+    theta = theta * d2r
+    alpha = alpha * d2r
     return np.array([
-        [ct, -st, 0, a],
-        [st * ca, ct * ca, -sa, -d * sa],
-        [st * sa, ct * sa, ca, d * ca],
+        [m.cos(theta), -m.sin(theta), 0, a],
+        [m.sin(theta)*m.cos(alpha), m.cos(theta)*m.cos(alpha), -m.sin(alpha), -m.sin(alpha)*d],
+        [m.sin(theta)*m.sin(alpha), m.cos(theta)*m.sin(alpha), m.cos(alpha), m.cos(alpha)*d],
         [0, 0, 0, 1]
     ], dtype=float)
 
-def Homogeneous_trans_matrix(_first, _last):
-    """
-    คูณ T จากแถว _first จนก่อน _last (last-exclusive)
-    และ "ใส่มุมข้อต่อปัจจุบัน" ลงไปแทน theta ของ 6 joint แรก
-    """
-    global DH_table, theta
+def Homogeneous_trans_matrix(first, last):
+    global DH_table
     Tn = np.identity(4)
-    for t in range(_first, _last):
-        alpha_deg, a, d, theta_off_deg = DH_table[t]
-        alpha_rad = alpha_deg * d2r
-        if t < 6:
-            theta_rad = theta[t] + theta_off_deg * d2r  # joint i
-        else:
-            theta_rad = theta_off_deg * d2r             # tool frame (fixed)
-        Tn = np.dot(Tn, dh_transforms(alpha_rad, a, d, theta_rad))
+    for t in range(first, last):
+        alpha, a, d, theta = DH_table[t]
+        T = dh_transforms(alpha, a, d, theta)
+        Tn = np.dot(Tn, T)
     return Tn
 
-def rotation_matrix(_first, _last):
-    return Homogeneous_trans_matrix(_first, _last)[0:3, 0:3]
-
-def rotation_matrix_to_euler_angles(R):
-    # ZYX euler (roll x, pitch y, yaw z)
-    EPS = 1e-9
-    r02 = max(-1.0, min(1.0, float(R[0, 2])))
-    beta = m.asin(r02)
-    if abs(r02) < 1.0 - EPS:
-        alpha = m.atan2(-R[1, 2], R[2, 2])
-        gamma = m.atan2(-R[0, 1], R[0, 0])
-    else:
-        alpha = 0.0
-        gamma = m.atan2(R[1, 0], R[1, 1])
-    return np.array([alpha, beta, gamma])  # [rad]
-
-def foward_kinematic():
-    # position of end-effector (base frame)
-    fw = np.dot(Homogeneous_trans_matrix(0, len(DH_table)), Pe)
-    return np.array(fw[:3])
+def rotation_matrix(first, last):
+    T = Homogeneous_trans_matrix(first, last)
+    return T[0:3, 0:3]
 
 def Euler():
-    # return euler [rad] ของ end-effector
-    R = rotation_matrix(0, len(DH_table))
-    return rotation_matrix_to_euler_angles(R)
+    R = rotation_matrix(0, DH_size)
+    alpha = np.arctan2(-R[1,2], R[2,2]) * r2d
+    beta  = np.arcsin(R[0,2]) * r2d
+    gamma = np.arctan2(-R[0,1], R[0,0]) * r2d
+    return np.array([alpha, beta, gamma])
 
-# ======================= Jacobian-based IK =======================
+def foward_kinematic():
+    fw = np.dot(Homogeneous_trans_matrix(0, DH_size), Pe)
+    return np.array(fw[:3]).round(6)
+
 def Jacobian_matrix():
+    J = []
+    for i in range(1, DH_size):
+        r  = np.dot(Homogeneous_trans_matrix(i, DH_size - 1), Ende)
+        R0 = rotation_matrix(0, i)
+        r0 = np.dot(R0, r[0:3])
+        k0 = np.dot(R0, [0, 0, 1])
+        Jn = np.concatenate((np.cross(k0, r0), k0))
+        J.append(Jn)
+    return np.transpose(np.array(J))
+
+# =============== Pose helpers (????) ===============
+def current_pose():
+    """Return current p (3,) in meters and R (3x3)."""
+    p = foward_kinematic().astype(float)
+    R = rotation_matrix(0, DH_size)
+    return p, R
+
+def rotvec_error(R_cur, R_des):
     """
-    6x6 Jacobian (linear;angular) ใน base frame
-    สูตรมาตรฐาน: Jv_i = z_i x (p_e - p_i),  Jw_i = z_i
-    หมายเหตุ: ใช้ p_e จากโซ่ DH รวม tool แล้ว (@ Pe)
+    Rotation error as rotation vector in radians:
+    e_omega = Log(R_des * R_cur^T)  (axis-angle vector)
     """
-    n = len(DH_table)  # 7 rows (6 joints + tool)
-    Jcols = []
+    Re = np.dot(R_des, R_cur.T)
+    tr = np.trace(Re)
+    c = max(min((tr - 1.0) * 0.5, 1.0), -1.0)  # clamp
+    angle = np.arccos(c)
+    if angle < 1e-9:
+        return np.zeros(3)
+    denom = 2.0 * np.sin(angle)
+    vx = (Re[2,1] - Re[1,2]) / denom
+    vy = (Re[0,2] - Re[2,0]) / denom
+    vz = (Re[1,0] - Re[0,1]) / denom
+    axis = np.array([vx, vy, vz])
+    return axis * angle  # radians
 
-    # ตำแหน่งปลายหุ่นจากโซ่เต็ม (รวม tool)
-    p_e = (Homogeneous_trans_matrix(0, n) @ Pe)[0:3]
+def pose_error6(p_des, R_des):
+    """Return 6x1 pose error [dp; e_omega] with units [m, m, m, rad, rad, rad]."""
+    p_cur, R_cur = current_pose()
+    dp = (np.array(p_des, dtype=float) - p_cur)
+    e_omega = rotvec_error(R_cur, R_des)
+    return np.concatenate((dp, e_omega))
 
-    for i in range(6):
-        Ti = Homogeneous_trans_matrix(0, i) if i > 0 else np.identity(4)
-        p_i = Ti[0:3, 3]
-        z_i = Ti[0:3, 2]
-        Jv = np.cross(z_i, (p_e - p_i))
-        Jw = z_i
-        Jcols.append(np.concatenate([Jv, Jw]))
-
-    J = np.stack(Jcols, axis=1)
-    return J
-
+# =============== X(), inverse, IK, MSE (??????) ===============
 def X():
-    # สถานะปลายหุ่นจริง [x y z roll pitch yaw] (rad)
-    pos = foward_kinematic()
-    ori = Euler()
-    return np.concatenate((pos, ori))
+    # ??????????????????????????? ??????????? IK ????
+    Zero = [0.0, 0.0, 0.0]
+    return np.concatenate((foward_kinematic(), Zero))
 
-def inverse_kinematics(desire_pos, alpha, theta_deg):
-    """
-    desire_pos: [x y z roll pitch yaw] (rad)
-    alpha: step size
-    theta_deg: รับเป็นองศาตามสัญญาเดิม แล้วแปลงเป็น rad ภายใน
-    """
-    global theta
-    Delta_X = desire_pos - X()
-    invJ = np.linalg.pinv(Jacobian_matrix())
-    Delta_theta = np.dot(invJ, Delta_X)  # [rad]
-    theta = np.array(theta_deg) * d2r    # current theta [rad]
-    Ntheta = theta + (alpha * Delta_theta)
-    return Ntheta
+def inverse(M):
+    return np.linalg.pinv(np.array(M))
 
-# ======================= Cubic trajectory =======================
+def inverse_kinematic(p_des, R_des, alpha, theta_deg_dict_or_arr):
+    """
+    Resolved-rate IK: theta_{k+1} = theta_k + alpha * J^+ * e,
+    where e = [dp; e_omega] in [m, m, m, rad, rad, rad]
+    """
+    e6 = pose_error6(p_des, R_des)
+    invJ = inverse(Jacobian_matrix())
+    Delta_theta = np.dot(invJ, e6)  # radians
+    theta = degarr2radarr(theta_deg_dict_or_arr)
+    return theta + alpha * Delta_theta  # radians
+
+def MSE(p_des, R_des):
+    e6 = pose_error6(p_des, R_des)
+    return float(np.mean(e6**2))
+
+# ======================= Trajectory (unchanged) =======================
 def cubic_position(u0, uf, v0, vf, tf, t):
-    # v0=vf=0 case
-    return u0 + ((3 / (tf**2)) * (uf - u0) * (t**2)) - ((2 / (tf**3)) * (uf - u0) * (t**3))
+    return u0 + ((3/(tf**2))*(uf-u0)*(t**2)) - ((2/(tf**3))*(uf-u0)*(t**3))
 
-def cubic_velocity(u0, uf, v0, vf, tf, t):
-    return ((6 / (tf**2)) * (uf - u0) * t) - ((6 / (tf**3)) * (uf - u0) * (t**2))
+# ======================= New helper functions =======================
+def init_task_random(th0, d_xyz, deg=50, joint_n=6):
+    for i in range(joint_n):
+        th0[i] = rand.randrange(-deg, deg+1)
+    for _ in range(2):
+        d_xyz.append(rand.randrange(45, 55)*0.01)
+    d_xyz.append(0.0375)
 
-def cubic_acceleration(u0, uf, v0, vf, tf, t):
-    return ((6 / (tf**2)) * (uf - u0)) - ((12 / (tf**3)) * (uf - u0) * t)
+def pause_seconds(t):
+    t0 = time.time()
+    while (time.time() - t0) < t:
+        pass
 
-def cubic_debug(u0, uf, v0, vf, tf, t):
-    print(f"time : {t:.3f}s | Pos : {cubic_position(u0,uf,v0,vf,tf,t):.4f} | "
-          f"Vel : {cubic_velocity(u0,uf,v0,vf,tf,t):.4f} | "
-          f"Acc : {cubic_acceleration(u0,uf,v0,vf,tf,t):.4f}")
+def banner(msg):
+    print("\n" + "="*12 + f" {msg} " + "="*12)
 
-# ======================= Random task generator =======================
-def random_task_positions():
-    # กำหนดช่วงสุ่มที่เหมาะสม (เมตร) ให้ไม่ชนโต๊ะ/ฐาน
-    p0 = np.array([rand.uniform(-0.45, 0.45),
-                   rand.uniform(-0.45, 0.45),
-                   rand.uniform(0.15, 0.55)])
-    pf = np.array([rand.uniform(-0.45, 0.45),
-                   rand.uniform(-0.45, 0.45),
-                   rand.uniform(0.15, 0.55)])
-    return p0, pf
-
-# ======================= Robust handle helpers =======================
-def _natural_key(name: str):
-    return [int(s) if s.isdigit() else s.lower() for s in re.findall(r'\d+|\D+', name)]
-
-def _try_get(paths):
-    for p in paths:
-        try:
-            return sim.getObject(p)
-        except:
-            pass
-    return None
-
-def _find_ur5_handles():
-    """
-    คืนค่า: (hdl_j_list[6], hdl_end)
-    ค้นหาจาก model root (.)
-    """
-    model = sim.getObject('.')
-
-    # 1) รวบรวม joint ใต้โมเดล
-    joints = sim.getObjectsInTree(model, sim.object_joint_type, 0)  # 0 = children
-    # จัดเรียงตามชื่อธรรมชาติ
-    aliases = [(h, sim.getObjectAlias(h, 1)) for h in joints]
-    aliases.sort(key=lambda x: _natural_key(x[1]))
-    hdl_j_list = [h for h, _ in aliases[:6]]
-    if len(hdl_j_list) != 6:
-        # พยายามดึงด้วย path ที่พบบ่อย
-        alt = []
-        for i in range(1, 7):
-            h = _try_get([f'./joint{i}', f'/UR5/joint{i}', f'/UR5_joint{i}'])
-            if h is not None:
-                alt.append(h)
-        if len(alt) == 6:
-            hdl_j_list = alt
-        else:
-            found = [sim.getObjectAlias(h, 1) for h in joints]
-            raise RuntimeError(f'พบ joint {len(joints)} ตัว: {found} แต่จัดชุด 6 ตัวไม่สำเร็จ')
-
-    # 2) หา end-effector / tip
-    candidate_paths = [
-        './EndPoint', '/UR5/EndPoint',
-        './tip', '/UR5/tip', './Tip', '/UR5/Tip',
-        './ee', '/UR5/ee', './toolTip', '/UR5/toolTip'
-    ]
-    hdl_end = _try_get(candidate_paths)
-    if hdl_end is None:
-        dummies = sim.getObjectsInTree(model, sim.object_dummy_type, 0)
-        if dummies:
-            scored = []
-            for d in dummies:
-                name = sim.getObjectAlias(d, 1).lower()
-                score = 0
-                if 'tip' in name: score += 2
-                if 'end' in name: score += 1
-                scored.append((score, d))
-            scored.sort(reverse=True)
-            if scored and scored[0][0] > 0:
-                hdl_end = scored[0][1]
-    if hdl_end is None:
-        # fallback: ใช้ joint สุดท้ายแทนตำแหน่งคร่าว ๆ
-        hdl_end = hdl_j_list[-1]
-    return hdl_j_list, hdl_end
-
-# ======================= CoppeliaSim =======================
-def sysCall_init():
-    global sim
-    sim = require('sim')  # ตามรูปแบบ CoppeliaSim
-
-def sysCall_thread():
-    global DH_table, theta
-
-    print("\n========= Task Space Path Planning (Cubic + Jacobian IK) =========")
-
-    # ===== Get joints & end-effector robustly (แก้บั๊ก path ไม่ตรง) =====
-    try:
-        hdl_j_list, hdl_end = _find_ur5_handles()
-    except Exception as e:
-        print(f"[error] หา joint/EndPoint ไม่สำเร็จ: {e}")
-        return
-    hdl_j = {i: hdl_j_list[i] for i in range(6)}
-
-    # Draw path
-    line_handle = sim.addDrawingObject(sim.drawing_lines, 3, 0, -1, 200, [0, 1, 0])
-
-    # Generate random task
-    p0, pf = random_task_positions()
-    print(f"Start: {np.round(p0,3)} | Goal: {np.round(pf,3)}")
-
-    # ===== User params =====
-    tf_user = 8.0              # เวลาที่ผู้ใช้กำหนด
-    a_lin_max = 0.5            # [m/s^2] ความเร่งเชิงเส้นสูงสุดที่กำหนด
-    alpha = 0.05               # IK step size
-
-    # ===== Initialize DH (UR5) =====
-    theta = np.zeros(6)        # rad
-    DH_table = np.array([
-        [0,    0,       0.0892, -90],
-        [90,   0,       0,       90],
-        [0,    0.4251,  0,        0],
-        [0,    0.3922,  0.110,   -90],
-        [-90,  0,       0.0948,   0],
-        [90,   0,       0.0,      0],
-        [0,    0,       0.26658, 180]   # tool
+# >>> Utilities ?????? DH ??????
+def build_ur5_dh_from_deg(th_deg_dict):
+    return np.array([
+        [0,    0,       0.0892,  -90 + th_deg_dict.get(0)],
+        [90,   0,       0,        90 + th_deg_dict.get(1)],
+        [0,    0.4251,  0,         th_deg_dict.get(2)],
+        [0,    0.3922,  0.110,    -90 + th_deg_dict.get(3)],
+        [-90,  0,       0.0948,     th_deg_dict.get(4)],
+        [90,   0,       0.07495,    th_deg_dict.get(5)],
+        [0,    0,       0.19163,   180]
     ], dtype=float)
 
-    # ส่งค่าเริ่มต้นไปที่จอยท์
+def set_DH_from_th(th_deg_dict):
+    global DH_table, DH_size
+    DH_table = build_ur5_dh_from_deg(th_deg_dict)
+    DH_size  = len(DH_table)
+
+def set_sim_joints_from_deg(sim, hdl_j, th_deg_dict):
     for i in range(6):
-        sim.setJointTargetPosition(hdl_j[i], float(theta[i]))
+        sim.setJointTargetPosition(hdl_j[i], th_deg_dict.get(i)*d2r)
 
-    # ===== Lock initial orientation =====
-    ori0 = Euler()                   # [rad] orientation ณ ต้นทาง
-    pos0_actual = foward_kinematic() # สำหรับ debug
+# >>> ???????????????????????? (????? a_max) ?????????
+def compute_T_used(distance, a_max, T_req):
+    if distance <= 1e-9:
+        return max(T_req, 0.5)  # ????????????
+    T_min = 2.0 * m.sqrt(distance / max(a_max, 1e-9))
+    return max(T_req, T_min)
 
-    # ===== Respect a_lin_max by stretching tf if needed =====
-    # สำหรับ cubic v0=vf=0, |a|max ≈ 6‖Δp‖ / tf^2  → tf_min = sqrt(6‖Δp‖ / a_max)
-    dp_norm = np.linalg.norm(pf - p0)
-    tf_min = m.sqrt(max(1e-9, 6.0 * dp_norm / max(1e-6, a_lin_max)))
-    tf = max(tf_user, tf_min)
-    if tf > tf_user + 1e-6:
-        print(f"[info] TF stretched to {tf:.3f}s to satisfy a_lin_max={a_lin_max} m/s^2")
+def tri_distance_traveled(t, T, a):
+    # ????????????????? ? ???? t (?????????-??????), ???????????/??????????
+    half = 0.5 * T
+    if t <= half:
+        return 0.5 * a * t**2
+    else:
+        t2 = t - half
+        v_peak = a * half
+        return (0.5 * a * half**2) + (v_peak * t2) - 0.5 * a * t2**2
 
-    # ===== Trajectory loop =====
-    t0 = time.time()
-    prev_ee = None
+# ======================= Main trial =======================
+def run_trial(trial_id, sim, hdl_j, hdl_end, tf=20.0, tb=5.0, alpha=0.01, err_thresh=0.004, max_iters=1000,
+              a_max=0.8):  # a_max [m/s^2]
+    global DH_table, DH_size
+    th, th0, thf, d_xyz = {}, {}, {}, []
 
-    while True:
-        t = time.time() - t0
-        if t > tf:
+    init_task_random(th0, d_xyz, 50, 6)
+    thf = th0.copy()
+
+    banner(f"TEST CASE #{trial_id}")
+    print(f"[Start Angles] q0 (deg): {th0}")
+    print(f"[Target Position] XYZ (m): {np.round(np.array(d_xyz),4).tolist()} | tf(req)={tf}s | tb={tb}s | a_max={a_max} m/s^2")
+
+    # ????????????????? + ?????? DH
+    set_sim_joints_from_deg(sim, hdl_j, th0)
+    set_DH_from_th(th0)
+
+    # ??? R_des = orientation ???????? (???????????????????????)
+    p_start, R_start = current_pose()
+    p_goal  = np.array(d_xyz, dtype=float)
+    R_des   = R_start.copy()
+
+    print("[IK Solver] Searching for final joint configuration (keep orientation fixed)...")
+    t_search0 = time.time()
+    for it in range(1, max_iters+1):
+        set_DH_from_th(thf)
+        new_theta_rad = inverse_kinematic(p_goal, R_des, alpha, thf)  # radians
+        new_theta_deg = new_theta_rad * r2d
+        thf = dict(enumerate(new_theta_deg))
+        err = MSE(p_goal, R_des)
+
+        if it % 20 == 0:
+            print(f"  Iter {it:4d} | MSE6: {err:.6f}")
+        if err <= err_thresh:
             break
 
-        # Cubic interpolation (v0=vf=0)
-        pos_t = np.array([cubic_position(p0[i], pf[i], 0, 0, tf, t) for i in range(3)])
-        Xd = np.concatenate((pos_t, ori0))  # orientation คงเดิม = ori0
+    print(f"[IK Completed] Time: {time.time()-t_search0:.2f}s | Iterations: {it}")
+    print("[Final Angles] qf (deg):", {i: round(thf[i], 2) for i in range(6)})
 
-        # Inverse Kinematics step (คงสัญญา argument เดิม)
-        new_theta = inverse_kinematics(Xd, alpha, theta * r2d)
-        theta = new_theta
+    # ?????????????????????? a_max ?????????? D (?????????????????)
+    D = float(np.linalg.norm(p_goal - p_start))
+    T_used = compute_T_used(D, a_max, tf)
+    a_used = (4.0 * D) / (T_used**2) if D > 1e-9 else a_max  # a ??????????? D ?????????????????????????? T_used
+    print(f"[Time Scaling] D={D:.4f} m | T_used={T_used:.3f} s | a_used={a_used:.4f} m/s^2")
 
-        for i in range(6):
-            sim.setJointTargetPosition(hdl_j[i], float(theta[i]))
+    # ??????????????????????????????, orientation ??????
+    print("[Motion] Executing Cartesian straight-line with triangular time-scaling (fixed orientation)...")
+    t0 = time.time()
+    t = 0.0
+    th_cur = th0.copy()
+    set_DH_from_th(th_cur)
 
-        # Draw path segment
-        ee_pos = sim.getObjectPosition(hdl_end, -1)  # [x,y,z]
-        if prev_ee is not None:
-            sim.addDrawingObjectItem(line_handle, prev_ee + ee_pos)
-        prev_ee = ee_pos
+    ik_inner_steps = 2
+    alpha_track = max(alpha, 0.02)  # ??????????????????????????
 
+    while t < T_used:
+        s_abs = tri_distance_traveled(t, T_used, a_used)
+        s = 0.0 if D < 1e-9 else np.clip(s_abs / D, 0.0, 1.0)
+        p_des = p_start + (p_goal - p_start) * s
+
+        # Resolved-rate IK ????????????? ? ?????????????
+        for _ in range(ik_inner_steps):
+            set_DH_from_th(th_cur)
+            new_theta_rad = inverse_kinematic(p_des, R_des, alpha_track, th_cur)
+            new_theta_deg = new_theta_rad * r2d
+            th_cur = dict(enumerate(new_theta_deg))
+
+        set_sim_joints_from_deg(sim, hdl_j, th_cur)
+
+        if int(t) % 5 == 0:
+            print(f"  t={t:6.2f}s | s={s:5.3f} | pos={np.round(p_des,4).tolist()} | orient=fixed")
+
+        t = time.time() - t0
         sim.switchThread()
 
-    print("Motion complete. Path drawn.")
+    # ????????????????????
+    set_sim_joints_from_deg(sim, hdl_j, thf)
+    print("[Motion Completed] Robot reached target pose with fixed orientation.")
+
+# ======================= Simulation callbacks =======================
+def sysCall_init():
+    global sim
+    sim = require('sim')
+
+def sysCall_thread():
+    hdl_j={}
+    hdl_j[0] = sim.getObject("/UR5/joint")
+    hdl_j[1] = sim.getObject("/UR5/joint/link/joint")
+    hdl_j[2] = sim.getObject("/UR5/joint/link/joint/link/joint")
+    hdl_j[3] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint")
+    hdl_j[4] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint/link/joint")
+    hdl_j[5] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint/link/joint/link/joint")
+    hdl_end = sim.getObject("/UR5/EndPoint")
+
+    for k in range(1, 4):
+        run_trial(
+            k, sim, hdl_j, hdl_end,
+            tf=20.0,        # ?????????????????????? (?????????????????? T_used ?????????)
+            tb=5.0,
+            alpha=0.01,
+            err_thresh=0.004,
+            max_iters=1000,
+            a_max=0.8       # ?????????????????????? [m/s^2]
+        )
+        pause_seconds(2)
+
+    banner("ALL TESTS COMPLETED SUCCESSFULLY")
