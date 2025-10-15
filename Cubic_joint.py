@@ -7,6 +7,9 @@ import random as rand
 pi  = np.pi
 d2r = pi/180
 r2d = 1/d2r
+
+# Robot global state (???????????????????? sysCall_thread ??????????)
+DH_table = None
 DH_size  = 0
 first    = 0
 last     = 0
@@ -15,8 +18,11 @@ last     = 0
 Pe   = np.array([0, 0, 0, 1], dtype=float)
 Ende = np.array([0, 0, 0.19163, 1], dtype=float)
 
-# =======================  version 02: dh_transforms & euler =======================
+# ======================= ??? version 02: dh_transforms & euler =======================
 def dh_transforms(alpha, a, d, theta):
+    """
+    DH transform (??????????????????????? v02)
+    """
     ca = m.cos(alpha); sa = m.sin(alpha)
     ct = m.cos(theta); st = m.sin(theta)
     A = np.array([
@@ -28,6 +34,9 @@ def dh_transforms(alpha, a, d, theta):
     return A
 
 def rotation_matrix_to_euler_angles(R):
+    """
+    X-Y-Z (intrinsic) ??? v02 ? ???????????????????????
+    """
     EPS = 1e-9
     r02 = max(-1.0, min(1.0, float(R[0, 2])))
     beta = m.asin(r02)
@@ -43,7 +52,12 @@ def rotation_matrix_to_euler_angles(R):
 def degarr2radarr(deg):
     return np.array([d*d2r for d in deg], dtype=float)
 
+# --- ??? dh_transforms (??? v02) ??? DH2T ???? ---
 def Homogeneous_trans_matrix(_first, _last):
+    """
+    ???????????: ???? DH_table ???????? alpha,a,d,theta '????'
+    ?????????????????????????????????? dh_transforms (??? v02)
+    """
     global DH_table
     Tn = np.identity(4)
     for t in range(_first, _last):
@@ -55,11 +69,14 @@ def rotation_matrix(_first, _last):
     return Homogeneous_trans_matrix(_first, _last)[0:3, 0:3]
 
 def Euler():
+    """
+    ????????????????????? v02 ??????????? ??????????? '????' ??????????
+    """
     R = rotation_matrix(first, last)
     eul_rad = rotation_matrix_to_euler_angles(R)
     return eul_rad * r2d
 
-def foward_kinematic():  
+def foward_kinematic():  # ??????????????????????? call site
     fw = np.dot(Homogeneous_trans_matrix(first, last), Pe)
     return np.array(fw[:3]).round(6)
 
@@ -103,7 +120,7 @@ def debug_robot():
     print(Jacobian_matrix().round(6))
     print("---------------------------------------------")
 
-# ======================= Global cubic polynomial  =======================
+# ======================= Global cubic polynomial (??????????) =======================
 def cubic_position(u0, uf, v0, vf, tf, t):
     return u0 + ((3 / (tf**2)) * (uf - u0) * (t**2)) - ((2 / (tf**3)) * (uf - u0) * (t**3))
 
@@ -119,33 +136,30 @@ def cubic_debug(u0, uf, v0, vf, tf, t):
           f"Accelerate : {cubic_acceleration(u0,uf,v0,vf,tf,t)} ")
 
 # ======================= Utils =======================
-a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float) 
+a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float)  # ???????? ????????????/????????
 
 def start2stop(th0, thf, deg, joint_n):
     for i in range(joint_n):
-        th0[i] = rand.randrange(-deg, deg+1)   
+        th0[i] = rand.randrange(-deg, deg+1)   # ???????/??
         thf[i] = rand.randrange(-deg, deg+1)
 
 def choose_T_from_acc_limit(th0, thf, a_lim, T_min=2.0):
     dtheta = np.array([thf[i]-th0[i] for i in range(6)], dtype=float)
+    # T_i ???????????????????
     T_need = np.sqrt(6.0*np.abs(dtheta) / np.maximum(a_lim, 1e-6))
-    T = float(np.max(np.nan_to_num(T_need, nan=0.0)))  
-    return max(T, T_min)  
+    T = float(np.max(np.nan_to_num(T_need, nan=0.0)))  # ?????????????????????
+    return max(T, T_min)  # ????????????????
 
-def make_case(deg=60):
-    th0, thf = {}, {}
-    start2stop(th0, thf, deg, 6)
-    return th0, thf
 
 # ======================= CoppeliaSim callbacks =======================
 def sysCall_init():
     global sim
-    sim = require('sim')  # ตามสคริปต์เดิม
+    sim = require('sim')  # ??????????????
 
 def sysCall_thread():
     global DH_table, DH_size, first, last
 
-    # define handles for axis
+    # --- handles ---
     hdl_j = {}
     hdl_j[0] = sim.getObject("/UR5/joint")
     hdl_j[1] = sim.getObject("/UR5/joint/link/joint")
@@ -153,53 +167,68 @@ def sysCall_thread():
     hdl_j[3] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint")
     hdl_j[4] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint/link/joint")
     hdl_j[5] = sim.getObject("/UR5/joint/link/joint/link/joint/link/joint/link/joint/link/joint")
+    hdl_end = sim.getObject("/UR5/EndPoint")
 
-    # ---------- สร้าง 3 เคส ----------
-    cases = []
-    for _ in range(3):
-        th0, thf = make_case(deg=60)
-        cases.append((th0, thf))
+    print("\n========= JOINT-SPACE: 3 cases (cubic v0=vf=0) =========")
 
-    # ---------- ทำทีละเคส ----------
-    for ci, (th0, thf) in enumerate(cases, start=1):
-        print(f"\n========== Case {ci}/3 ==========")
+    for ci in range(1, 4):
+        # ------------ สุ่ม start/stop joints ------------
+        th0, thf, th = {}, {}, {}
+        start2stop(th0, thf, 60, 6)
 
+        # ------------ คำนวณ tf จากลิมิตเร่ง joint ------------
         tf = choose_T_from_acc_limit(th0, thf, a_lim, T_min=4.0)
         dtheta = np.array([thf[i] - th0[i] for i in range(6)], dtype=float)
-        a_max_est = 6.0*np.abs(dtheta)/(tf**2)
+        a_max_est = 6.0*np.abs(dtheta)/(tf**2)  # deg/s^2
+
+        print(f"\n---------- Case {ci}/3 ----------")
         print("Start :", th0)
         print("Stop  :", thf)
-        print("Times (auto from a_max):", tf)
-        print("a_max (theoretical):", a_max_est.round(2))
-        print("a_lim:", a_lim)
-
-        # ตั้งค่าตำแหน่งเริ่มต้น
+        print("Times (auto from a_max):", round(tf,3), "s")
+        print("a_max (theoretical) per joint:", a_max_est.round(2).tolist())
+        print("a_lim:", a_lim.tolist())
+        v0_check = [cubic_velocity(th0.get(i), thf.get(i), 0, 0, tf, 0.0) for i in range(6)]
+        vf_check = [cubic_velocity(th0.get(i), thf.get(i), 0, 0, tf, tf) for i in range(6)]
+        print("max |v(0)| =", max(abs(v) for v in v0_check), "deg/s")
+        print("max |v(tf)|=", max(abs(v) for v in vf_check), "deg/s")
+        # ------------ ตั้งค่าเริ่มต้น ------------
         for i in range(6):
             sim.setJointTargetPosition(hdl_j[i], th0.get(i) * d2r)
         sim.switchThread()
 
-        # -------- เคลื่อนที่ --------
+        # ------------ เดินทางด้วย cubic (v0=vf=0) ------------
+        print("Start moving...")
         t = 0.0
         t1 = time.time()
-        th = {}
-        print("Start moving...")
-
         while t < tf:
             for i in range(6):
                 th[i] = cubic_position(th0.get(i), thf.get(i), 0, 0, tf, t)
                 sim.setJointTargetPosition(hdl_j[i], th.get(i) * d2r)
 
+            # อัปเดต DH_table เพื่อ debug/ตรวจ FK ได้ถ้าต้องการ
+            DH_table = np.array([
+                [0,      0,        0.0892,     -90 + th.get(0)],
+                [90,     0,        0,           90 + th.get(1)],
+                [0,      0.4251,   0,            th.get(2)],
+                [0,      0.39215,  0.110,       -90 + th.get(3)],
+                [-90,    0,        0.09475,      th.get(4)],
+                [90,     0,        0.0,          th.get(5)],
+                [0,      0,        0.26658,      180]
+            ], dtype=float)
+            DH_size = len(DH_table); first = 0; last = DH_size
+
+            # time & yield
             t = time.time() - t1
             sim.switchThread()
 
         print(f"Stop (Case {ci})")
 
-        # -------- delay รอ 3 วินาทีก่อนเปลี่ยนเคส --------
+        # ------------ หน่วงก่อนเคสถัดไป ------------
         wait_time = 3.0
-        print(f"Waiting {wait_time} seconds before next case...")
-        t_wait = time.time()
-        while (time.time() - t_wait) < wait_time:
-            sim.switchThread()  # คอยให้ซิมอัปเดตระหว่างรอ
+        print(f"Waiting {wait_time}s before next case...")
+        t_wait0 = time.time()
+        while (time.time() - t_wait0) < wait_time:
+            sim.switchThread()
 
     print("\nAll 3 cases done.")
     pass
