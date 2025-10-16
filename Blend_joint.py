@@ -105,65 +105,67 @@ def debug_robot():
     print("---------------------------------------------")
 
 # ======================= LSPB (Linear interp. with parabolic blend) =======================
-class LSPB:
+def lspb_init(q0, qf, a_max, T):
     """
-    Linear with Parabolic Blend (start/end v = 0).
-    a_max คือลิมิตความเร่งเชิงขนาด (deg/s^2), เครื่องหมายทิศทางจัดการด้วย sign(dq)
+    ?????? state ?????? LSPB (v0=vf=0)
+    ?????? dict ????????????????????????????????????? position/velocity/acceleration
     """
-    def __init__(self, q0, qf, a_max, T):
-        self.q0 = float(q0)
-        self.qf = float(qf)
-        self.dq = self.qf - self.q0
-        self.s  = 1.0 if self.dq >= 0.0 else -1.0
-        self.a  = float(max(abs(a_max), 1e-6))
-        self.T  = float(max(T, 1e-6))
-        # ตรวจสอบเงื่อนไขความเป็นไปได้ของโปรไฟล์: T >= 2*sqrt(|dq|/a)
-        Tmin = 2.0*m.sqrt(abs(self.dq)/self.a) if self.a > 0 else self.T
-        if self.T < Tmin:
-            # ปรับ T ให้ขั้นต่ำที่เป็นไปได้ (กันพัง)
-            self.T = Tmin
-        # คำนวณ tb และ v_max ตามสมการ LSPB
-        # tb = (a*T - sqrt(a^2*T^2 - 4a*|dq|)) / (2a) = 0.5*(T - sqrt(T^2 - 4|dq|/a))
-        disc = max(self.T*self.T - 4.0*abs(self.dq)/self.a, 0.0)
-        self.tb = 0.5*(self.T - m.sqrt(disc))
-        self.vmax = self.a * self.tb  # เป็นบวกเสมอ, เครื่องหมายทิศทางคูณด้วย s ตอนใช้งานจริง
+    q0 = float(q0)
+    qf = float(qf)
+    dq = qf - q0
+    s  = 1.0 if dq >= 0.0 else -1.0
+    a  = float(max(abs(a_max), 1e-6))
+    T  = float(max(T, 1e-6))
+    # ???????????????: T >= 2*sqrt(|dq|/a)
+    Tmin = 2.0*m.sqrt(abs(dq)/a) if a > 0 else T
+    if T < Tmin:
+        T = Tmin
+    # tb = 0.5*(T - sqrt(T^2 - 4|dq|/a))
+    disc = max(T*T - 4.0*abs(dq)/a, 0.0)
+    tb = 0.5*(T - m.sqrt(disc))
+    vmax = a * tb
+    d_blend = 0.5 * a * tb * tb
+    Tc = T - 2.0 * tb
+    return {
+        "q0": q0, "qf": qf, "dq": dq, "s": s, "a": a, "T": T,
+        "tb": tb, "vmax": vmax, "d_blend": d_blend, "Tc": Tc
+    }
 
-        # ระยะที่วิ่งในเฟสเร่ง (และเฟสหน่วง)
-        self.d_blend = 0.5*self.a*self.tb*self.tb
-        # เฟสกลางความเร็วคงที่ยาวเท่าไร
-        self.Tc = self.T - 2.0*self.tb
+def lspb_position(state, t):
+    q0, qf = state["q0"], state["qf"]
+    s, a, T, tb, vmax, d_blend = state["s"], state["a"], state["T"], state["tb"], state["vmax"], state["d_blend"]
+    t = float(min(max(t, 0.0), T))
+    if t < tb:
+        return q0 + s*(0.5*a*t*t)
+    elif t <= (T - tb):
+        return q0 + s*(d_blend + vmax*(t - tb))
+    else:
+        td = T - t
+        return qf - s*(0.5*a*td*td)
 
-    def position(self, t):
-        t = float(min(max(t, 0.0), self.T))
-        if t < self.tb:
-            # accel: q = q0 + 0.5*a*t^2
-            return self.q0 + self.s*(0.5*self.a*t*t)
-        elif t <= (self.T - self.tb):
-            # cruise: q = q0 + d_blend + vmax*(t - tb)
-            return self.q0 + self.s*(self.d_blend + self.vmax*(t - self.tb))
-        else:
-            # decel (mirror): q = qf - 0.5*a*(T - t)^2
-            td = self.T - t
-            return self.qf - self.s*(0.5*self.a*td*td)
+def lspb_velocity(state, t):
+    s, a, T, tb, vmax = state["s"], state["a"], state["T"], state["tb"], state["vmax"]
+    t = float(min(max(t, 0.0), T))
+    if t < tb:
+        return s*(a*t)
+    elif t <= (T - tb):
+        return s*(vmax)
+    else:
+        td = T - t
+        return s*(a*td)
 
-    def velocity(self, t):
-        t = float(min(max(t, 0.0), self.T))
-        if t < self.tb:
-            return self.s*(self.a*t)
-        elif t <= (self.T - self.tb):
-            return self.s*(self.vmax)
-        else:
-            td = self.T - t
-            return self.s*(self.a*td)
-
-    def acceleration(self, t):
-        t = float(min(max(t, 0.0), self.T))
-        if t < self.tb:          return self.s*self.a
-        elif t <= (self.T-self.tb): return 0.0
-        else:                    return -self.s*self.a
+def lspb_acceleration(state, t):
+    s, a, T, tb = state["s"], state["a"], state["T"], state["tb"]
+    t = float(min(max(t, 0.0), T))
+    if t < tb:
+        return s*a
+    elif t <= (T - tb):
+        return 0.0
+    else:
+        return -s*a
 
 # ======================= Utils =======================
-# ลิมิตความเร่งสูงสุดของแต่ละข้อ (deg/s^2)
+# ?????????????????????????????? (deg/s^2)
 a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float)
 
 def start2stop(th0, thf, deg, joint_n):
@@ -173,8 +175,8 @@ def start2stop(th0, thf, deg, joint_n):
 
 def choose_T_from_acc_limit_LSPB(th0, thf, a_lim, T_min=2.0):
     """
-    เงื่อนไข LSPB (v0=vf=0) ต้องมี T >= 2*sqrt(|dq|/a)
-    เลือก T ให้ใหญ่พอสำหรับทุก joint
+    ???????? LSPB (v0=vf=0) ?????? T >= 2*sqrt(|dq|/a)
+    ????? T ?????????????????? joint
     """
     Tmin_list = []
     for i in range(6):
@@ -206,20 +208,20 @@ def sysCall_thread():
     print("\n========= JOINT-SPACE: 3 cases (LSPB: v0=vf=0) =========")
 
     for ci in range(1, 4):
-        # ------------ สุ่ม start/stop joints ------------
+        # ------------ ???? start/stop joints ------------
         th0, thf, th = {}, {}, {}
         start2stop(th0, thf, 60, 6)
 
-        # ------------ คำนวณ tf จากลิมิตเร่ง (LSPB) ------------
+        # ------------ ????? tf ???????????? (LSPB) ------------
         tf = choose_T_from_acc_limit_LSPB(th0, thf, a_lim, T_min=4.0)
 
-        # เตรียมอ็อบเจ็กต์ LSPB ต่อ joint
+        # ???????????????? LSPB ??? joint
         lspb = {}
         tb_list, vmax_list = [], []
         for i in range(6):
-            lspb[i] = LSPB(th0[i], thf[i], a_lim[i], tf)
-            tb_list.append(round(lspb[i].tb, 4))
-            vmax_list.append(round(lspb[i].vmax, 3))  # เป็นขนาด (บวก)
+            lspb[i] = lspb_init(th0[i], thf[i], a_lim[i], tf)
+            tb_list.append(round(lspb[i]["tb"], 4))
+            vmax_list.append(round(lspb[i]["vmax"], 3))
 
         print(f"\n---------- Case {ci}/3 ----------")
         print("Start :", th0)
@@ -229,21 +231,21 @@ def sysCall_thread():
         print("v_max magnitude per joint:", vmax_list, "deg/s")
         print("a_lim:", a_lim.tolist())
 
-        # ------------ ตั้งค่าเริ่มต้น ------------
+        # ???????????????
         for i in range(6):
             sim.setJointTargetPosition(hdl_j[i], th0.get(i) * d2r)
         sim.switchThread()
 
-        # ------------ เดินทางด้วย LSPB ------------
+        # ====== ??????????? "????????????? LSPB" ????????? ======
         print("Start moving (LSPB)...")
         t = 0.0
         t1 = time.time()
         while t < tf:
             for i in range(6):
-                th[i] = lspb[i].position(t)
+                th[i] = lspb_position(lspb[i], t)     # ?????????????? .position()
                 sim.setJointTargetPosition(hdl_j[i], th.get(i) * d2r)
 
-            # อัปเดต DH_table เพื่อ debug/ตรวจ FK ได้ถ้าต้องการ
+            # ?????? DH_table ???????
             DH_table = np.array([
                 [0,      0,        0.0892,     -90 + th.get(0)],
                 [90,     0,        0,           90 + th.get(1)],
@@ -255,13 +257,12 @@ def sysCall_thread():
             ], dtype=float)
             DH_size = len(DH_table); first = 0; last = DH_size
 
-            # time & yield
             t = time.time() - t1
             sim.switchThread()
 
         print(f"Stop (Case {ci})")
 
-        # ------------ หน่วงก่อนเคสถัดไป ------------
+        # ------------ ????????????????? ------------
         wait_time = 3.0
         print(f"Waiting {wait_time}s before next case...")
         t_wait0 = time.time()
