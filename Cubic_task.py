@@ -3,18 +3,15 @@ import numpy as np
 import math as m
 import random as rand
 
-# ======================= Global constants =======================
 pi = np.pi
 d2r = pi/180
 r2d = 1/d2r
 
-# ======================= Global variables =======================
 DH_table = None
 DH_size  = 0
 Pe   = np.array([0, 0, 0, 1], dtype=float)
 Ende = np.array([0, 0, 0.19163, 1], dtype=float)
 
-# ======================= Core robot math (names unchanged) =======================
 def degarr2radarr(deg_dict_or_arr):
     if isinstance(deg_dict_or_arr, dict):
         arr_deg = np.array([deg_dict_or_arr.get(i, 0.0) for i in range(6)], dtype=float)
@@ -67,7 +64,6 @@ def Jacobian_matrix():
         J.append(Jn)
     return np.transpose(np.array(J))
 
-# =============== Pose helpers ===============
 def current_pose():
     """Return current p (3,) in meters and R (3x3)."""
     p = foward_kinematic().astype(float)
@@ -99,9 +95,7 @@ def pose_error6(p_des, R_des):
     e_omega = rotvec_error(R_cur, R_des)
     return np.concatenate((dp, e_omega))
 
-# =============== X(), inverse, IK, MSE ===============
 def X():
-    # ??????????????????????????? ??????????? IK ????
     Zero = [0.0, 0.0, 0.0]
     return np.concatenate((foward_kinematic(), Zero))
 
@@ -123,10 +117,7 @@ def MSE(p_des, R_des):
     e6 = pose_error6(p_des, R_des)
     return float(np.mean(e6**2))
 
-# ======================= Cubic polynomial (position/velocity/acceleration) =======================
 def cubic_position(u0, uf, v0, vf, tf, t):
-    # ?????? v0=vf=0 ?????????: u(t)=u0 + (uf-u0)*(3*(t/tf)^2 - 2*(t/tf)^3)
-    # ?????????????? (???????????????????? BCs)
     dt = tf
     a0 = u0
     a1 = v0
@@ -153,9 +144,7 @@ def cubic_debug(u0, uf, v0, vf, tf, t):
           f"Velocity : {cubic_velocity(u0,uf,v0,vf,tf,t):.6f} , "
           f"Accelerate : {cubic_acceleration(u0,uf,v0,vf,tf,t):.6f}")
 
-# ======================= New helper functions =======================
 def init_task_random(th0, d_xyz, deg=50, joint_n=6):
-    # ??????? seed ?????????????????; ??? start/goal ???????? task-space ??????????
     for i in range(joint_n):
         th0[i] = rand.randrange(-deg, deg+1)
     for _ in range(2):
@@ -170,7 +159,6 @@ def pause_seconds(t):
 def banner(msg):
     print("\n" + "="*12 + f" {msg} " + "="*12)
 
-# >>> Utilities ?????? DH ??????
 def build_ur5_dh_from_deg(th_deg_dict):
     return np.array([
         [0,    0,       0.0892,  -90 + th_deg_dict.get(0)],
@@ -191,32 +179,25 @@ def set_sim_joints_from_deg(sim, hdl_j, th_deg_dict):
     for i in range(6):
         sim.setJointTargetPosition(hdl_j[i], th_deg_dict.get(i)*d2r)
 
-# ====== ?????: ????????? task-space ?????????? ======
+
 def sample_task_point():
-    # ???????????????????????????????
     x = rand.uniform(0.25, 0.60)
     y = rand.uniform(-0.40, 0.60)
     z = rand.uniform(0.05, 0.35)
     return np.array([x, y, z], dtype=float)
 
-# ====== ?????: ?????????? IK ????? pose ?????????? (Jacobian + pinv) ======
 def solve_IK_to_pose(p_des, R_des, th_seed_deg, alpha=0.03, iters=1200, tol=1e-4):
-    th_work = dict(th_seed_deg)  # ???????????? deg
+    th_work = dict(th_seed_deg) 
     for _ in range(iters):
         set_DH_from_th(th_work)
         e6 = pose_error6(p_des, R_des)
         if np.linalg.norm(e6) <= tol:
             break
         new_theta_rad = inverse_kinematic(p_des, R_des, alpha, th_work)  # radians
-        th_work = dict(enumerate(new_theta_rad * r2d))  # ???????? deg
+        th_work = dict(enumerate(new_theta_rad * r2d)) 
     return th_work
 
-# >>> ????????? T ???????? a_max ?????? cubic (v0=vf=0) ?????????
 def choose_T_cubic(distance, a_max, T_req):
-    """
-    ?????? cubic (v0=vf=0) ?? |s''|_max = 6/T^2 ??? |p''|_max = |?p|*6/T^2
-    ? T >= sqrt(6*|?p|/a_max)
-    """
     if distance <= 1e-9:
         return max(T_req, 0.5)
     T_min = m.sqrt(6.0 * distance / max(a_max, 1e-9))
@@ -224,35 +205,29 @@ def choose_T_cubic(distance, a_max, T_req):
 
 # ======================= Main trial =======================
 def run_trial(trial_id, sim, hdl_j, hdl_end, tf=20.0, tb=5.0, alpha=0.01, err_thresh=0.004, max_iters=1000,
-              a_max=0.8):  # a_max [m/s^2]
+              a_max=0.8):  
     global DH_table, DH_size
     th, th0, thf, d_xyz = {}, {}, {}, []
 
-    # seed ????????? (?????????? IK ????? p_start_des ?????)
     init_task_random(th0, d_xyz, 50, 6)
     thf = th0.copy()
 
     banner(f"TEST CASE #{trial_id}")
     print(f"[Start Joint Seed] q0_seed (deg): {th0}")
-
-    # ????????????????? + ?????? DH (????????? start ????)
     set_sim_joints_from_deg(sim, hdl_j, th0)
     set_DH_from_th(th0)
 
-    # --- ???? start/goal ?? task-space ?????????????? ---
     p_start_des = sample_task_point()
     p_goal_des  = sample_task_point()
 
-    # ??????? orientation ???????????? orientation ?????? (???????????????????????)
+  
     _, R_start_meas = current_pose()
     R_des = R_start_meas.copy()
 
-    # ??? IK ?????????????????? p_start_des ????????? (start velocity = 0)
     th0 = solve_IK_to_pose(p_start_des, R_des, th0, alpha=0.03, iters=1200, tol=1e-4)
     set_sim_joints_from_deg(sim, hdl_j, th0)
     set_DH_from_th(th0)
 
-    # ?????? p_start ??? FK ??????????? ??????? p_goal = p_goal_des
     p_start, _ = current_pose()
     p_goal = p_goal_des.copy()
 
@@ -274,17 +249,15 @@ def run_trial(trial_id, sim, hdl_j, hdl_end, tf=20.0, tb=5.0, alpha=0.01, err_th
     print(f"[IK Completed] Time: {time.time()-t_search0:.2f}s | Iterations: {it}")
     print("[Final Angles] qf (deg):", {i: round(thf[i], 2) for i in range(6)})
 
-    # ===== ?????????????????????? a_max (??????? cubic) =====
     D = float(np.linalg.norm(p_goal - p_start))           # |?p|
     T_used = choose_T_cubic(D, a_max, tf)
-    # ????????????????????? s(t): 0?1, ??? v0=vf=0
+
     u0, uf, v0, vf = 0.0, 1.0, 0.0, 0.0
     print(f"[Time Scaling] D={D:.4f} m | T_req={tf:.3f} s | T_used={T_used:.3f} s | a_max={a_max:.4f} m/s^2")
-    # ??????? a_peak ??????????: |p''|_max = D * 6/T^2
+
     a_peak = (6.0 * D) / (T_used**2) if D > 1e-9 else 0.0
     print(f"[Check] a_peak(cubic)={a_peak:.4f} m/s^2 (<= a_max OK)")
 
-    # ===== ????????????????????????????, orientation ??????, cubic time-scaling =====
     print("[Motion] Executing Cartesian straight-line with cubic time-scaling (fixed orientation)...")
     t0 = time.time()
     t = 0.0
@@ -292,13 +265,12 @@ def run_trial(trial_id, sim, hdl_j, hdl_end, tf=20.0, tb=5.0, alpha=0.01, err_th
     set_DH_from_th(th_cur)
 
     ik_inner_steps = 2
-    alpha_track = max(alpha, 0.02)  # ??????????????????????????
+    alpha_track = max(alpha, 0.02)  
 
     while t < T_used:
-        s = cubic_position(u0, uf, v0, vf, T_used, t)  # ?????????????? (0?1)
+        s = cubic_position(u0, uf, v0, vf, T_used, t)  
         p_des = p_start + (p_goal - p_start) * s
 
-        # Resolved-rate IK ????????????? ? ?????????????
         for _ in range(ik_inner_steps):
             set_DH_from_th(th_cur)
             new_theta_rad = inverse_kinematic(p_des, R_des, alpha_track, th_cur)
@@ -312,12 +284,9 @@ def run_trial(trial_id, sim, hdl_j, hdl_end, tf=20.0, tb=5.0, alpha=0.01, err_th
 
         t = time.time() - t0
         sim.switchThread()
-
-    # ????????????????????
     set_sim_joints_from_deg(sim, hdl_j, thf)
     print("[Motion Completed] Robot reached target pose with fixed orientation.")
 
-# ======================= Simulation callbacks =======================
 def sysCall_init():
     global sim
     sim = require('sim')
@@ -335,12 +304,12 @@ def sysCall_thread():
     for k in range(1, 4):
         run_trial(
             k, sim, hdl_j, hdl_end,
-            tf=20.0,        # ?????????????????????????? (?????????????????? T_used ?????????)
+            tf=20.0,      
             tb=5.0,
             alpha=0.01,
             err_thresh=0.004,
             max_iters=1000,
-            a_max=0.8       # ?????????????????????? [m/s^2]
+            a_max=0.8       
         )
         pause_seconds(2)
 
