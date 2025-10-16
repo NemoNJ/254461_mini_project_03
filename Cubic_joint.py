@@ -8,21 +8,15 @@ pi  = np.pi
 d2r = pi/180
 r2d = 1/d2r
 
-# Robot global state (???????????????????? sysCall_thread ??????????)
 DH_table = None
 DH_size  = 0
 first    = 0
 last     = 0
 
-# ????????????????? (??????????)
 Pe   = np.array([0, 0, 0, 1], dtype=float)
 Ende = np.array([0, 0, 0.19163, 1], dtype=float)
 
-# ======================= ??? version 02: dh_transforms & euler =======================
 def dh_transforms(alpha, a, d, theta):
-    """
-    DH transform (??????????????????????? v02)
-    """
     ca = m.cos(alpha); sa = m.sin(alpha)
     ct = m.cos(theta); st = m.sin(theta)
     A = np.array([
@@ -34,9 +28,6 @@ def dh_transforms(alpha, a, d, theta):
     return A
 
 def rotation_matrix_to_euler_angles(R):
-    """
-    X-Y-Z (intrinsic) ??? v02 ? ???????????????????????
-    """
     EPS = 1e-9
     r02 = max(-1.0, min(1.0, float(R[0, 2])))
     beta = m.asin(r02)
@@ -48,16 +39,10 @@ def rotation_matrix_to_euler_angles(R):
         gamma = m.atan2(R[1, 0], R[1, 1])
     return np.array([alpha, beta, gamma])
 
-# ======================= Global kinematics funcs (v01 interface ??????) =======================
 def degarr2radarr(deg):
     return np.array([d*d2r for d in deg], dtype=float)
 
-# --- ??? dh_transforms (??? v02) ??? DH2T ???? ---
 def Homogeneous_trans_matrix(_first, _last):
-    """
-    ???????????: ???? DH_table ???????? alpha,a,d,theta '????'
-    ?????????????????????????????????? dh_transforms (??? v02)
-    """
     global DH_table
     Tn = np.identity(4)
     for t in range(_first, _last):
@@ -69,14 +54,11 @@ def rotation_matrix(_first, _last):
     return Homogeneous_trans_matrix(_first, _last)[0:3, 0:3]
 
 def Euler():
-    """
-    ????????????????????? v02 ??????????? ??????????? '????' ??????????
-    """
     R = rotation_matrix(first, last)
     eul_rad = rotation_matrix_to_euler_angles(R)
     return eul_rad * r2d
 
-def foward_kinematic():  # ??????????????????????? call site
+def foward_kinematic(): 
     fw = np.dot(Homogeneous_trans_matrix(first, last), Pe)
     return np.array(fw[:3]).round(6)
 
@@ -120,7 +102,6 @@ def debug_robot():
     print(Jacobian_matrix().round(6))
     print("---------------------------------------------")
 
-# ======================= Global cubic polynomial (??????????) =======================
 def cubic_position(u0, uf, v0, vf, tf, t):
     return u0 + ((3 / (tf**2)) * (uf - u0) * (t**2)) - ((2 / (tf**3)) * (uf - u0) * (t**3))
 
@@ -135,26 +116,25 @@ def cubic_debug(u0, uf, v0, vf, tf, t):
           f"Velocity : {cubic_velocity(u0,uf,v0,vf,tf,t)} , "
           f"Accelerate : {cubic_acceleration(u0,uf,v0,vf,tf,t)} ")
 
-# ======================= Utils =======================
-a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float)  # ???????? ????????????/????????
+
+a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float) 
 
 def start2stop(th0, thf, deg, joint_n):
     for i in range(joint_n):
-        th0[i] = rand.randrange(-deg, deg+1)   # ???????/??
+        th0[i] = rand.randrange(-deg, deg+1)  
         thf[i] = rand.randrange(-deg, deg+1)
 
 def choose_T_from_acc_limit(th0, thf, a_lim, T_min=2.0):
     dtheta = np.array([thf[i]-th0[i] for i in range(6)], dtype=float)
-    # T_i ???????????????????
     T_need = np.sqrt(6.0*np.abs(dtheta) / np.maximum(a_lim, 1e-6))
-    T = float(np.max(np.nan_to_num(T_need, nan=0.0)))  # ?????????????????????
-    return max(T, T_min)  # ????????????????
+    T = float(np.max(np.nan_to_num(T_need, nan=0.0))) 
+    return max(T, T_min)  
 
 
-# ======================= CoppeliaSim callbacks =======================
+
 def sysCall_init():
     global sim
-    sim = require('sim')  # ??????????????
+    sim = require('sim')  
 
 def sysCall_thread():
     global DH_table, DH_size, first, last
@@ -191,12 +171,10 @@ def sysCall_thread():
         vf_check = [cubic_velocity(th0.get(i), thf.get(i), 0, 0, tf, tf) for i in range(6)]
         print("max |v(0)| =", max(abs(v) for v in v0_check), "deg/s")
         print("max |v(tf)|=", max(abs(v) for v in vf_check), "deg/s")
-        # ------------ ตั้งค่าเริ่มต้น ------------
         for i in range(6):
             sim.setJointTargetPosition(hdl_j[i], th0.get(i) * d2r)
         sim.switchThread()
 
-        # ------------ เดินทางด้วย cubic (v0=vf=0) ------------
         print("Start moving...")
         t = 0.0
         t1 = time.time()
@@ -205,7 +183,6 @@ def sysCall_thread():
                 th[i] = cubic_position(th0.get(i), thf.get(i), 0, 0, tf, t)
                 sim.setJointTargetPosition(hdl_j[i], th.get(i) * d2r)
 
-            # อัปเดต DH_table เพื่อ debug/ตรวจ FK ได้ถ้าต้องการ
             DH_table = np.array([
                 [0,      0,        0.0892,     -90 + th.get(0)],
                 [90,     0,        0,           90 + th.get(1)],
