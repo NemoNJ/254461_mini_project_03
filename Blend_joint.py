@@ -3,22 +3,18 @@ import numpy as np
 import math as m
 import random as rand
 
-# ======================= Global constants/state =======================
 pi  = np.pi
 d2r = pi/180
 r2d = 1/d2r
 
-# Robot global state
 DH_table = None
 DH_size  = 0
 first    = 0
 last     = 0
 
-# End-effector points
 Pe   = np.array([0, 0, 0, 1], dtype=float)
 Ende = np.array([0, 0, 0.19163, 1], dtype=float)
 
-# ======================= DH & Euler =======================
 def dh_transforms(alpha, a, d, theta):
     ca = m.cos(alpha); sa = m.sin(alpha)
     ct = m.cos(theta); st = m.sin(theta)
@@ -104,23 +100,16 @@ def debug_robot():
     print(Jacobian_matrix().round(6))
     print("---------------------------------------------")
 
-# ======================= LSPB (Linear interp. with parabolic blend) =======================
 def lspb_init(q0, qf, a_max, T):
-    """
-    ?????? state ?????? LSPB (v0=vf=0)
-    ?????? dict ????????????????????????????????????? position/velocity/acceleration
-    """
     q0 = float(q0)
     qf = float(qf)
     dq = qf - q0
     s  = 1.0 if dq >= 0.0 else -1.0
     a  = float(max(abs(a_max), 1e-6))
     T  = float(max(T, 1e-6))
-    # ???????????????: T >= 2*sqrt(|dq|/a)
     Tmin = 2.0*m.sqrt(abs(dq)/a) if a > 0 else T
     if T < Tmin:
         T = Tmin
-    # tb = 0.5*(T - sqrt(T^2 - 4|dq|/a))
     disc = max(T*T - 4.0*abs(dq)/a, 0.0)
     tb = 0.5*(T - m.sqrt(disc))
     vmax = a * tb
@@ -164,8 +153,6 @@ def lspb_acceleration(state, t):
     else:
         return -s*a
 
-# ======================= Utils =======================
-# ?????????????????????????????? (deg/s^2)
 a_lim = np.array([80, 80, 100, 150, 150, 200], dtype=float)
 
 def start2stop(th0, thf, deg, joint_n):
@@ -174,10 +161,6 @@ def start2stop(th0, thf, deg, joint_n):
         thf[i] = rand.randrange(-deg, deg+1)
 
 def choose_T_from_acc_limit_LSPB(th0, thf, a_lim, T_min=2.0):
-    """
-    ???????? LSPB (v0=vf=0) ?????? T >= 2*sqrt(|dq|/a)
-    ????? T ?????????????????? joint
-    """
     Tmin_list = []
     for i in range(6):
         dq = float(thf[i] - th0[i])
@@ -187,7 +170,6 @@ def choose_T_from_acc_limit_LSPB(th0, thf, a_lim, T_min=2.0):
     T = max(max(Tmin_list), float(T_min))
     return T
 
-# ======================= CoppeliaSim callbacks =======================
 def sysCall_init():
     global sim
     sim = require('sim')
@@ -208,14 +190,10 @@ def sysCall_thread():
     print("\n========= JOINT-SPACE: 3 cases (LSPB: v0=vf=0) =========")
 
     for ci in range(1, 4):
-        # ------------ ???? start/stop joints ------------
         th0, thf, th = {}, {}, {}
         start2stop(th0, thf, 60, 6)
-
-        # ------------ ????? tf ???????????? (LSPB) ------------
         tf = choose_T_from_acc_limit_LSPB(th0, thf, a_lim, T_min=4.0)
 
-        # ???????????????? LSPB ??? joint
         lspb = {}
         tb_list, vmax_list = [], []
         for i in range(6):
@@ -231,18 +209,15 @@ def sysCall_thread():
         print("v_max magnitude per joint:", vmax_list, "deg/s")
         print("a_lim:", a_lim.tolist())
 
-        # ???????????????
         for i in range(6):
             sim.setJointTargetPosition(hdl_j[i], th0.get(i) * d2r)
         sim.switchThread()
-
-        # ====== ??????????? "????????????? LSPB" ????????? ======
         print("Start moving (LSPB)...")
         t = 0.0
         t1 = time.time()
         while t < tf:
             for i in range(6):
-                th[i] = lspb_position(lspb[i], t)     # ?????????????? .position()
+                th[i] = lspb_position(lspb[i], t)     
                 sim.setJointTargetPosition(hdl_j[i], th.get(i) * d2r)
 
             # ?????? DH_table ???????
@@ -261,8 +236,6 @@ def sysCall_thread():
             sim.switchThread()
 
         print(f"Stop (Case {ci})")
-
-        # ------------ ????????????????? ------------
         wait_time = 3.0
         print(f"Waiting {wait_time}s before next case...")
         t_wait0 = time.time()
